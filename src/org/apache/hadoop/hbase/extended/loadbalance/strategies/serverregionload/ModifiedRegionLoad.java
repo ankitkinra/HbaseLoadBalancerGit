@@ -47,7 +47,8 @@ public abstract class ModifiedRegionLoad implements
 
 	public ModifiedRegionLoad(RegionLoad rl) {
 		this.baseRegionLoad = rl;
-		calculateLoad();
+		//call calculateLoad() once from the base class constructor extending this class
+		//in order to set the load for the first time.
 	}
 
 	protected abstract void calculateLoad();
@@ -200,5 +201,16 @@ public abstract class ModifiedRegionLoad implements
 		}
 		this.load = load;
 	}
+
+	@Override
+	public String toString() {
+		StringBuilder builder = new StringBuilder();
+		builder.append("ModifiedRegionLoad [baseRegionLoad=")
+				.append(baseRegionLoad).append(", load=").append(load)
+				.append("]");
+		return builder.toString();
+	}
+	
+	
 
 }

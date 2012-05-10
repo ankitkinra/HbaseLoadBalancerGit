@@ -26,19 +26,26 @@ import org.apache.hadoop.hbase.extended.loadbalance.strategies.serverregionload.
  * 
  */
 public abstract class HotSpotRegionLoad extends ModifiedRegionLoad {
-
+	
+	protected long divideFactor;
 	private boolean regionHotspot = false;
 
-	public HotSpotRegionLoad(RegionLoad rl) {
+	public HotSpotRegionLoad(RegionLoad rl, long pDivideFactor) {
 		super(rl);
-	}
-
-	public HotSpotRegionLoad(HotSpotRegionLoad rl) {
-		super(rl.getBaseRegionLoad());
+		this.divideFactor = pDivideFactor;
+		calculateLoad();
 	}
 
 	public boolean isRegionHotspot() {
 		return regionHotspot;
+	}
+
+	@Override
+	public String toString() {
+		StringBuilder builder = new StringBuilder();
+		builder.append("HotSpotRegionLoad [divideFactor=").append(divideFactor)
+				.append(", regionHotspot=").append(regionHotspot).append("]");
+		return builder.toString();
 	}
 
 	public void setRegionHotspot(boolean regionHotspot) {

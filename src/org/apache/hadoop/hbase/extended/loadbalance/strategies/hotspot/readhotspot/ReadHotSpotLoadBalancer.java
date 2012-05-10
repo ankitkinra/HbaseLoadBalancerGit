@@ -23,12 +23,10 @@ import org.apache.hadoop.hbase.HServerLoad.RegionLoad;
 import org.apache.hadoop.hbase.extended.loadbalance.strategies.hotspot.HotSpotLoadBalancer;
 import org.apache.hadoop.hbase.extended.loadbalance.strategies.hotspot.HotSpotRegionLoad;
 
-
-
 public class ReadHotSpotLoadBalancer extends HotSpotLoadBalancer {
 
 	protected HotSpotRegionLoad getHotSpotRegionLoadInstance(
-			Map.Entry<byte[], RegionLoad> loadItem) {
-		return new ReadHotSpotRegionLoad(loadItem.getValue());
+			Map.Entry<String, RegionLoad> loadItem, long pDivideFactor) {
+		return new ReadHotSpotRegionLoad(loadItem.getValue(), pDivideFactor);
 	}
 }

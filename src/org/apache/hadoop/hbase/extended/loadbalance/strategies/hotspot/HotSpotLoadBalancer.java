@@ -49,9 +49,14 @@ public abstract class HotSpotLoadBalancer extends DefaultLoadBalancer {
 	private static final Log LOG = LogFactory.getLog(HotSpotLoadBalancer.class);
 	private double hotspotLoadPercentThreshold;
 	private double hotspotLoadNumberRegionsThreshold;
+	protected long divideFactor;
 
 	public double getHotspotLoadPercentThreshold() {
 		return hotspotLoadPercentThreshold;
+	}
+
+	public void setClusterStatus(ClusterStatus st) {
+		this.status = st;
 	}
 
 	public double getHotspotLoadNumberRegionsThreshold() {
@@ -60,30 +65,29 @@ public abstract class HotSpotLoadBalancer extends DefaultLoadBalancer {
 
 	@Override
 	public void setConf(Configuration conf) {
-		this.slop = conf.getFloat("hbase.regions.slop", (float) 0.2);
+		this.config = conf;
+	}
+
+	private void initParameters() {
+		this.slop = this.config.getFloat("hbase.regions.slop", (float) 0.2);
 		if (slop < 0)
 			slop = 0;
 		else if (slop > 1)
 			slop = 1;
-		hotspotLoadPercentThreshold = (double)conf.getFloat("hbase.extended.loadbalance.strategies.hotspot.percentthresh", (float)0.9);
-		hotspotLoadNumberRegionsThreshold = (double)conf.getFloat("hbase.extended.loadbalance.strategies.hotspot.regionthresh", (float)0.5);
-		this.config = conf;
+		hotspotLoadPercentThreshold = (double) this.config.getFloat(
+				"hbase.extended.loadbalance.strategies.hotspot.percentthresh",
+				(float) 0.9);
+		hotspotLoadNumberRegionsThreshold = (double) this.config.getFloat(
+				"hbase.extended.loadbalance.strategies.hotspot.regionthresh",
+				(float) 0.5);
+		divideFactor = this.config
+				.getLong("hbase.loadbalancer.dividefactor", 1);
 	}
-	
+
 	@Override
 	public List<RegionPlan> balanceCluster(
 			Map<ServerName, List<HRegionInfo>> clusterState) {
-		LOG.info("#################Came in the new Balancer Code");
-		long startTime = System.currentTimeMillis();
-		LOG.info("#################startTime = " + startTime);
-		int numServers = clusterState.size();
-		LOG.info("#################numServers = " + numServers);
-		if (numServers == 0) {
-			LOG.debug("numServers=0 so skipping load balancing");
-			LOG.info("#################numServers=0 so skipping load balancing");
-			return null;
-		}
-
+		initParameters();
 		/**
 		 * <pre>
 		 * We atleast need two priority queues 
@@ -96,40 +100,46 @@ public abstract class HotSpotLoadBalancer extends DefaultLoadBalancer {
 		 * </pre>
 		 */
 
-		NavigableMap<HotSpotServerAndLoad, List<HotSpotRegionLoad>> serversByLoad = new TreeMap<HotSpotServerAndLoad, List<HotSpotRegionLoad>>();
+		LOG.debug("#################Came in the new Balancer Code and the cluster status is = "
+				+ this.status);
+		long startTime = System.currentTimeMillis();
+		int numServers = clusterState.size();
+		if (numServers == 0) {
+			LOG.info("numServers=0 so skipping load balancing");
+			return null;
+
+		}
+
+		NavigableMap<HotSpotServerAndLoad, List<HotSpotRegionLoad>> regionServerAndServerLoadMap = new TreeMap<HotSpotServerAndLoad, List<HotSpotRegionLoad>>();
 		PriorityQueue<HotSpotServerAndLoad> hotspotRegionServers = new PriorityQueue<HotSpotServerAndLoad>(
 				numServers, HotSpotServerAndLoad.DESC_LOAD);
 		PriorityQueue<HotSpotServerAndLoad> nonHotspotRegionServers = new PriorityQueue<HotSpotServerAndLoad>(
 				numServers, HotSpotServerAndLoad.ASC_LOAD);
-
-		HashBiMap<HRegionInfo, HotSpotRegionLoad> allRegionsBiMap = HashBiMap
+		HashBiMap<HRegionInfo, HotSpotRegionLoad> allRegionsLoadBiMap = HashBiMap
 				.create();
-
+		LOG.debug("#################clusterState=" + clusterState);
 		double normalisedTotalLoadOfAllRegions = initRegionLoadMapsBasedOnInput(
-				clusterState, serversByLoad, allRegionsBiMap);
-		LOG.info("#################normalisedTotalLoadOfAllRegions=" + normalisedTotalLoadOfAllRegions);
+				clusterState, regionServerAndServerLoadMap, allRegionsLoadBiMap);
+		LOG.debug("#################normalisedTotalLoadOfAllRegions="
+				+ normalisedTotalLoadOfAllRegions);
 		// Check if we even need to do any load balancing
 		double average = normalisedTotalLoadOfAllRegions / numServers; // for
-																		// logging
+		// logging
 		// HBASE-3681 check sloppiness first
-		if (!loadBalancingNeeded(numServers, serversByLoad,
+		LOG.debug("######################## final regionServerAndServerLoadMap == "
+				+ regionServerAndServerLoadMap);
+		if (!loadBalancingNeeded(numServers, regionServerAndServerLoadMap,
 				normalisedTotalLoadOfAllRegions, average)) {
 			// we do not need load balancing
 			return null;
 		}
-
-		// but there could be a condition where nonHotspotRegionServers are also
-		// loaded
-		// so we will not add them
-
 		double minLoad = normalisedTotalLoadOfAllRegions / numServers;
 		double maxLoad = normalisedTotalLoadOfAllRegions % numServers == 0 ? minLoad
 				: minLoad + 1;
 		// as we now have to balance stuff, init PQ's
-		
-		LOG.info(String.format("#################minLoad =%s,maxLoad= %s",
+		LOG.debug(String.format("#################minLoad =%s,maxLoad= %s",
 				minLoad, maxLoad));
-		for (Map.Entry<HotSpotServerAndLoad, List<HotSpotRegionLoad>> item : serversByLoad
+		for (Map.Entry<HotSpotServerAndLoad, List<HotSpotRegionLoad>> item : regionServerAndServerLoadMap
 				.entrySet()) {
 			HotSpotServerAndLoad serverLoad = item.getKey();
 			if (serverLoad.isHotSpot()) {
@@ -141,7 +151,6 @@ public abstract class HotSpotLoadBalancer extends DefaultLoadBalancer {
 				}
 			}
 		}
-
 		// Using to check balance result.
 		StringBuilder strBalanceParam = new StringBuilder();
 		strBalanceParam.append("Balance parameter: numRegions=")
@@ -149,38 +158,43 @@ public abstract class HotSpotLoadBalancer extends DefaultLoadBalancer {
 				.append(", numServers=").append(numServers).append(", max=")
 				.append(maxLoad).append(", min=").append(minLoad);
 		LOG.debug(strBalanceParam.toString());
-
-		// Balance the cluster
-
 		List<RegionPlan> regionsToReturn = new ArrayList<RegionPlan>();
-		LOG.info(String.format("#################hotspotRegionServers.size() =%s,nonHotspotRegionServers.size()= %s",
-				hotspotRegionServers.size(), nonHotspotRegionServers.size()));
+		
 		while (hotspotRegionServers.size() > 0
 				&& nonHotspotRegionServers.size() > 0) {
 			HotSpotServerAndLoad serverToBalance = hotspotRegionServers.poll();
-			LOG.info(String.format("#################serverToBalance =%s",
+			LOG.debug(String.format("#################serverToBalance =%s",
 					serverToBalance.getServerName().getServerName()));
 			// get least loaded not hotspot regions of this server
-			List<HotSpotRegionLoad> regionList = serversByLoad
+			List<HotSpotRegionLoad> regionList = regionServerAndServerLoadMap
 					.get(serverToBalance);
 			// assume it to be sorted asc.
 			if (regionList.size() > 0) {
 				HotSpotRegionLoad regionToMove = regionList.remove(0);
-				HRegionInfo regionMoveInfo = allRegionsBiMap.inverse().get(
+				HRegionInfo regionMoveInfo = allRegionsLoadBiMap.inverse().get(
 						regionToMove);
-				LOG.info(String
-						.format("#################regionMoveInfo =%s, metaRegion=%s, isRegionHotspot=%s ",
-								regionMoveInfo.getEncodedName(),
-								regionMoveInfo.isMetaRegion(),
-								regionToMove.isRegionHotspot()));
-				if (!regionMoveInfo.isMetaRegion()
-						&& !regionToMove.isRegionHotspot()) {
+				
+				/*
+				 * regionMoveInfo can be null in case the load map returns us
+				 * the root and meta regions along with the movable regions But
+				 * as the clusterState which is passed to us does not contain
+				 * these regions we can have a situation where
+				 * regionServerAndServerLoadMap contains some regions which are
+				 * not present in the allRegionsLoadBiMap
+				 */
+				if (regionMoveInfo != null && !regionMoveInfo.isMetaRegion()
+						&& !regionMoveInfo.isRootRegion()
+						&& !regionMoveInfo.isMetaTable()
+						&& regionToMove.isRegionHotspot()) {
+					LOG.debug(String
+							.format("#################Came to move the region regionMoveInfo=%s;; regionToMove=%s ",
+									regionMoveInfo, regionToMove));
 					// move out.
 					HotSpotServerAndLoad destinationServer = nonHotspotRegionServers
 							.poll();
-					
-					RegionPlan rpl = new RegionPlan(allRegionsBiMap.inverse()
-							.get(regionToMove),
+
+					RegionPlan rpl = new RegionPlan(allRegionsLoadBiMap
+							.inverse().get(regionToMove),
 							serverToBalance.getServerName(),
 							destinationServer.getServerName());
 					regionsToReturn.add(rpl);
@@ -200,8 +214,8 @@ public abstract class HotSpotLoadBalancer extends DefaultLoadBalancer {
 				+ (System.currentTimeMillis() - startTime));
 		LOG.info(String.format("#################regionsToReturn=%s ",
 				regionsToReturn));
-		
 		return regionsToReturn;
+
 	}
 
 	private boolean loadBalancingNeeded(
@@ -210,81 +224,166 @@ public abstract class HotSpotLoadBalancer extends DefaultLoadBalancer {
 			double normalisedTotalLoadOfAllRegions, double average) {
 		double floor = Math.floor(average * (1 - slop));
 		double ceiling = Math.ceil(average * (1 + slop));
-		if (serversByLoad.lastKey().getLoad() <= ceiling
-				&& serversByLoad.firstKey().getLoad() >= floor) {
-			// as it is sorted ascending we know that the lastKey has the most
-			// load.
-			// Skipped because no server outside (min,max) range
-			LOG.info("##########Skipping load balancing because balanced cluster; "
-					+ "servers=" + numServers + " " + "regions="
-					+ normalisedTotalLoadOfAllRegions + " average=" + average
-					+ " " + "mostloaded=" + serversByLoad.lastKey().getLoad()
-					+ " leastloaded=" + serversByLoad.firstKey().getLoad());
-			return false;
+		if (serversByLoad.size() > 0) {
+			if (serversByLoad.lastKey().getLoad() <= ceiling
+					&& serversByLoad.firstKey().getLoad() >= floor) {
+				// as it is sorted ascending we know that the lastKey has the
+				// most
+				// load.
+				// Skipped because no server outside (min,max) range
+				LOG.info("##########Skipping load balancing because balanced cluster; "
+						+ "servers="
+						+ numServers
+						+ " "
+						+ "regions="
+						+ normalisedTotalLoadOfAllRegions
+						+ " average="
+						+ average
+						+ " "
+						+ "mostloaded="
+						+ serversByLoad.lastKey().getLoad()
+						+ " leastloaded="
+						+ serversByLoad.firstKey().getLoad());
+				return false;
+			} else {
+				// only case where load balancing is required
+				return true;
+			}
 		}
-		return true;
+		return false;
 	}
 
+	/**
+	 * Iterate and initialize serversByLoad and allRegionsBiMap on the basis of
+	 * clusterState
+	 * 
+	 * 
+	 */
 	private double initRegionLoadMapsBasedOnInput(
 			Map<ServerName, List<HRegionInfo>> clusterState,
-			NavigableMap<HotSpotServerAndLoad, List<HotSpotRegionLoad>> serversByLoad,
-			HashBiMap<HRegionInfo, HotSpotRegionLoad> allRegionsBiMap) {
+			NavigableMap<HotSpotServerAndLoad, List<HotSpotRegionLoad>> regionServerAndServerLoadMap,
+			HashBiMap<HRegionInfo, HotSpotRegionLoad> allRegionsLoadBiMap) {
 		double normalisedTotalLoadOfAllRegionServers = 0.0;
-		HServerLoad regionServerLoad = null;
-		for (Map.Entry<ServerName, List<HRegionInfo>> regionserver : clusterState
+		
+		for (Map.Entry<ServerName, List<HRegionInfo>> regionServerRegionEntry : clusterState
 				.entrySet()) {
-			regionServerLoad = status.getLoad(regionserver.getKey());
-			Map<byte[], RegionLoad> regionalLoadMapforServer = regionServerLoad
-					.getRegionsLoad();
-			Map<byte[], HRegionInfo> inputNameRegionInfoMap = createRegionNameRegionInfoMapFromList(regionserver
-					.getValue());
-			double loadAllRegionsOneRegionServer = addRegionsToCompleteMap(
-					inputNameRegionInfoMap, regionserver.getKey(), serversByLoad,
-					regionalLoadMapforServer, allRegionsBiMap);
+			LOG.debug("#################initRegionLoadMapsBasedOnInput: regionServerRegionEntry.getKey()="
+					+ regionServerRegionEntry.getKey());
 
-			normalisedTotalLoadOfAllRegionServers += loadAllRegionsOneRegionServer;
-			LOG.info("#################server.getKey().getServerName=" + regionserver.getKey().getServerName());
-			// serversByLoad.put(new ModifiedServerAndLoad(server.getKey(),
-			// loadOnThisRegion), regions);
+			Map<String, HRegionInfo> regionNameRegionInfoMap = createRegionNameRegionInfoMapFromList(regionServerRegionEntry
+					.getValue());
+
+			HServerLoad regionServerLoad = status
+					.getLoad(regionServerRegionEntry.getKey());
+			LOG.debug("#################initRegionLoadMapsBasedOnInput:regionServerLoad="
+					+ regionServerLoad);
+			Map<byte[], RegionLoad> regionalLoadMapforServerOld = regionServerLoad
+					.getRegionsLoad();
+			Map<String, RegionLoad> regionalLoadMapforServer = new HashMap<String, HServerLoad.RegionLoad>();
+			for (Map.Entry<byte[], RegionLoad> entry : regionalLoadMapforServerOld
+					.entrySet()) {
+				//TODO: Remove this log
+				LOG.debug(String
+						.format("#################initRegionLoadMapsBasedOnInput: entry.getKey()=%s , entry.getValue() = %s, "
+								+ "entry.getValue().getName()= %s, entry.getValue().getNameAsString()= %s",
+								entry.getKey(), entry.getValue(), entry
+										.getValue().getName(), entry.getValue()
+										.getNameAsString()));
+				HRegionInfo regionInfoFromClusterState = regionNameRegionInfoMap
+						.get(entry.getValue().getNameAsString());
+				if (regionInfoFromClusterState != null) {
+					if (regionInfoFromClusterState.isMetaRegion()
+							|| regionInfoFromClusterState.isMetaTable()
+							|| regionInfoFromClusterState.isRootRegion()) {
+						// do not enter as we will not move these regions
+						LOG.debug(String
+								.format("#################initRegionLoadMapsBasedOnInput: regionInfoFromClusterState = %s is "
+										+ "not entered in the  regionalLoadMapforServer as we will not load balance this region due to meta nature",
+										regionInfoFromClusterState));
+					} else {
+						regionalLoadMapforServer.put(entry.getValue()
+								.getNameAsString(), entry.getValue());
+					}
+				} else {
+					LOG.debug(String
+							.format("#################initRegionLoadMapsBasedOnInput: entry = %s from  regionalLoadMapforServerOld"
+									+ " does not exists in regionNameRegionInfoMap",
+									entry));
+				}
+
+			}
+			LOG.debug("#################initRegionLoadMapsBasedOnInput: regionalLoadMapforServer="
+					+ regionalLoadMapforServer);
+
+			if (regionalLoadMapforServer.size() <= 1) {
+				LOG.info("#################initRegionLoadMapsBasedOnInput: as regionalLoadMapforServer<=1."
+						+ " We do not need to balance it");
+			} else {
+				
+				double loadAllRegionsOneRegionServer = addRegionsToCompleteMap(
+						regionNameRegionInfoMap,
+						regionServerRegionEntry.getKey(),
+						regionServerAndServerLoadMap, regionalLoadMapforServer,
+						allRegionsLoadBiMap);
+				LOG.debug("#################initRegionLoadMapsBasedOnInput: loadAllRegionsOneRegionServer="
+						+ loadAllRegionsOneRegionServer);
+				LOG.debug("#################initRegionLoadMapsBasedOnInput: allRegionsBiMap="
+						+ allRegionsLoadBiMap);
+				normalisedTotalLoadOfAllRegionServers += loadAllRegionsOneRegionServer;
+			}
+
 		}
 		return normalisedTotalLoadOfAllRegionServers;
 	}
 
-	private Map<byte[], HRegionInfo> createRegionNameRegionInfoMapFromList(
+	private Map<String, HRegionInfo> createRegionNameRegionInfoMapFromList(
 			List<HRegionInfo> listRegionInfo) {
-		Map<byte[], HRegionInfo> map = new HashMap<byte[], HRegionInfo>();
+		Map<String, HRegionInfo> map = new HashMap<String, HRegionInfo>();
 		for (HRegionInfo hri : listRegionInfo) {
-			map.put(hri.getEncodedNameAsBytes(), hri);
+			map.put(hri.getRegionNameAsString(), hri);
 		}
 		return map;
 	}
 
 	private double addRegionsToCompleteMap(
-			Map<byte[], HRegionInfo> inputNameRegionInfoMap,
+			Map<String, HRegionInfo> regionNameRegionInfoMap,
 			ServerName serverName,
 			NavigableMap<HotSpotServerAndLoad, List<HotSpotRegionLoad>> serversByLoad,
-			Map<byte[], RegionLoad> inputRegionalLoadMapforServer,
-			HashBiMap<HRegionInfo, HotSpotRegionLoad> allRegionsBiMap) {
+			Map<String, RegionLoad> regionalLoadMapforServer,
+			HashBiMap<HRegionInfo, HotSpotRegionLoad> allRegionsLoadBiMap) {
 		double loadAccumulator = 0.0;
 		List<HotSpotRegionLoad> modRegionLoadList = new ArrayList<HotSpotRegionLoad>();
 		boolean isHotspot = false;
 		HRegionInfo regionInfo = null;
 		TreeMap<HotSpotRegionLoad, HRegionInfo> regionLoadMap = new TreeMap<HotSpotRegionLoad, HRegionInfo>(
 				HotSpotRegionLoad.DESC_LOAD);
-		for (Map.Entry<byte[], RegionLoad> loadItem : inputRegionalLoadMapforServer
+		
+		for (Map.Entry<String, RegionLoad> loadItem : regionalLoadMapforServer
 				.entrySet()) {
-			// loadItem.getKey == regionCompleteEncodedName
-			regionInfo = inputNameRegionInfoMap.get(loadItem.getKey());
-			HotSpotRegionLoad readHotSpotRegionLoad = getHotSpotRegionLoadInstance(loadItem);
-			regionLoadMap.put(readHotSpotRegionLoad, regionInfo);
-			loadAccumulator += readHotSpotRegionLoad.getLoad();
-			modRegionLoadList.add(readHotSpotRegionLoad);
-			allRegionsBiMap.put(regionInfo, readHotSpotRegionLoad);
-			LOG.info("#################readHotSpotRegionLoad=" + readHotSpotRegionLoad.getRegionName());
+
+			regionInfo = regionNameRegionInfoMap.get(loadItem.getKey());
+			if (regionInfo == null) {
+				String message = "######################## as regionInfo is null from regionNameRegionInfoMap for the region name ="
+						+ loadItem.getKey()
+						+ " determined from  regionNameRegionInfoMap. The rest of the balancing is useless. "
+						+ "We need to return to the assignment manager.";
+				LOG.warn(message);
+			} else {
+				HotSpotRegionLoad readHotSpotRegionLoad = getHotSpotRegionLoadInstance(
+						loadItem, this.divideFactor);
+				LOG.debug("######################## loadItem = " + loadItem
+						+ "\n readHotSpotRegionLoad= " + readHotSpotRegionLoad);
+				regionLoadMap.put(readHotSpotRegionLoad, regionInfo);
+				loadAccumulator += readHotSpotRegionLoad.getLoad();
+				LOG.debug("######################## current loadAccumulator="
+						+ loadAccumulator);
+				modRegionLoadList.add(readHotSpotRegionLoad);
+				allRegionsLoadBiMap.put(regionInfo, readHotSpotRegionLoad);
+			}
 
 		}
 		// iterate over regionLoadMap and find if the top x% have y% load
-		isHotspot = isHotSpot(regionLoadMap, loadAccumulator);
+		isHotspot = isHotSpot(regionLoadMap, modRegionLoadList, loadAccumulator);
 		HotSpotServerAndLoad msl = new HotSpotServerAndLoad(serverName,
 				loadAccumulator, isHotspot);
 		Collections.sort(modRegionLoadList, HotSpotRegionLoad.DESC_LOAD);
@@ -301,11 +400,11 @@ public abstract class HotSpotLoadBalancer extends DefaultLoadBalancer {
 	 * used to make hotspot determination.
 	 */
 	protected abstract HotSpotRegionLoad getHotSpotRegionLoadInstance(
-			Map.Entry<byte[], RegionLoad> loadItem);
+			Map.Entry<String, RegionLoad> loadItem, long pDivideFactor);
 
 	private boolean isHotSpot(
 			TreeMap<HotSpotRegionLoad, HRegionInfo> regionLoadMap,
-			double totalLoad) {
+			List<HotSpotRegionLoad> exisitingRegionLoadList, double totalLoad) {
 		// iterate in order on HotSpotRegionLoad
 		boolean isHotSpot = false;
 		double loadTillNow = 0.0;
@@ -313,15 +412,31 @@ public abstract class HotSpotLoadBalancer extends DefaultLoadBalancer {
 		List<HotSpotRegionLoad> listToMarkHotSpot = new ArrayList<HotSpotRegionLoad>();
 		int counter = 0;
 		double hotspotLoad = totalLoad * hotspotLoadPercentThreshold;
-		int hotspotNumber = (int) (regionLoadMap.size() * hotspotLoadNumberRegionsThreshold);
+		LOG.debug("#################isHotSpot: hotspotLoad=" + hotspotLoad
+				+ " totalLoad= " + totalLoad
+				+ " hotspotLoadPercentThreshold = "
+				+ hotspotLoadPercentThreshold);
+		int hotspotNumber = (int) Math.ceil(regionLoadMap.size()
+				* hotspotLoadNumberRegionsThreshold);
+
+		LOG.debug("#################isHotSpot: hotspotNumber=" + hotspotNumber
+				+ " regionLoadMap.size()= " + regionLoadMap.size()
+				+ " hotspotLoadNumberRegionsThreshold = "
+				+ hotspotLoadNumberRegionsThreshold);
 		for (Map.Entry<HotSpotRegionLoad, HRegionInfo> regionLoadItem : regionLoadMap
 				.entrySet()) {
 			load = regionLoadItem.getKey();
 			loadTillNow += load.getLoad();
 			counter++;
+			LOG.debug(String
+					.format("#################isHotSpot: load = %s;loadTillNow=%s; hotspotLoad=%s; counter=%s ",
+							load, loadTillNow, hotspotLoad, counter));
 			if (loadTillNow >= hotspotLoad) {
-				// reached hotspot
-				if (counter < hotspotNumber) {
+				LOG.debug(String
+						.format("#################isHotSpot: counter = %s;hotspotNumber=%s; ",
+								counter, hotspotNumber));
+
+				if (counter <= hotspotNumber) {
 					// hotspot reached
 					listToMarkHotSpot.add(load);
 					isHotSpot = true;
@@ -330,17 +445,33 @@ public abstract class HotSpotLoadBalancer extends DefaultLoadBalancer {
 					break;
 				}
 			} else {
+				LOG.debug(String
+						.format("#################isHotSpot: Adding load = %s into potential hotspot list",
+								load));
 				// potentially hotspot
 				listToMarkHotSpot.add(load);
 			}
 		}
+		LOG.debug(String
+				.format("#################isHotSpot: isHotSpot =%s ; ;;listToMarkHotSpot = %s;exisitingRegionLoadList=%s ",
+						isHotSpot, listToMarkHotSpot, exisitingRegionLoadList));
+
 		if (isHotSpot) {
 			// need to mark the list as true.
 			for (HotSpotRegionLoad item : listToMarkHotSpot) {
-				item.setRegionHotspot(true);
+				int itemIndexIfExists = exisitingRegionLoadList.indexOf(item);
+				LOG.debug(String
+						.format("#################isHotSpot: Item =%s is in the exitisting list at index =%s ",
+								item, itemIndexIfExists));
+				if (itemIndexIfExists >= 0) {
+					exisitingRegionLoadList.get(itemIndexIfExists)
+							.setRegionHotspot(true);
+				}
 			}
 		}
 
+		LOG.debug("#################isHotSpot: listToMarkHotSpot List="
+				+ listToMarkHotSpot);
 		return isHotSpot;
 	}
 

@@ -22,8 +22,8 @@ import org.apache.hadoop.hbase.extended.loadbalance.strategies.hotspot.HotSpotRe
 
 public class ModifiedReadHotSpotRegionLoad extends HotSpotRegionLoad {
 
-	public ModifiedReadHotSpotRegionLoad(RegionLoad rl) {
-		super(rl);
+	public ModifiedReadHotSpotRegionLoad(RegionLoad rl, long pDivideFactor) {
+		super(rl,pDivideFactor);
 
 	}
 
@@ -32,9 +32,9 @@ public class ModifiedReadHotSpotRegionLoad extends HotSpotRegionLoad {
 	 * strategy for calculating the load.
 	 */
 	public void calculateLoad() {
-		double load = this.getReadRequests() / Long.MAX_VALUE;
+		double load = this.getReadRequests() / this.divideFactor;
 		// giving twice weight to number of store on the server
-		load += 2* this.getNumberOfStores() / Long.MAX_VALUE;
+		load += 2* this.getNumberOfStores() / this.divideFactor;
 		this.setLoad(load);
 	}
 
